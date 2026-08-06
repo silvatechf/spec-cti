@@ -1,0 +1,157 @@
+﻿version: "3.9"
+
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# CyberLab-Enterprise â€” all "victim" containers live on the isolated
+# `lab_network` bridge, which has no route to the host or to the internet.
+# The management plane (API, dashboard, DB) sits on `mgmt_network` and
+# reaches into `lab_network` only through the automation modules.
+# â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+networks:
+  lab_network:
+    driver: bridge
+    internal: true          # no external egress â€” sandboxed on purpose
+  mgmt_network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  elk_data:
+
+services:
+
+  # â”€â”€ Management plane â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  postgres:
+    image: postgres:16-alpine
+    container_name: cyberlab-postgres
+    environment:
+      POSTGRES_DB: cyberlab
+      POSTGRES_USER: cyberlab
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-devpassword_change_me}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - mgmt_network
+    ports:
+      - "127.0.0.1:5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cyberlab"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: containers/api/Dockerfile
+    container_name: cyberlab-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg2://cyberlab:${POSTGRES_PASSWORD:-devpassword_change_me}@postgres:5432/cyberlab
+      LAB_NETWORK_NAME: cyberlab-enterprise_lab_network
+    volumes:
+      - ./reports:/app/reports
+      - ./data:/app/data:ro
+      - /var/run/docker.sock:/var/run/docker.sock   # needed for containment (network detach)
+    networks:
+      - mgmt_network
+      - lab_network
+    ports:
+      - "127.0.0.1:8000:8000"
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: containers/dashboard/Dockerfile
+    container_name: cyberlab-dashboard
+    depends_on:
+      - api
+    environment:
+      API_URL: http://api:8000
+    networks:
+      - mgmt_network
+    ports:
+      - "127.0.0.1:8501:8501"
+
+  # â”€â”€ ELK (lightweight single-node) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
+    container_name: cyberlab-elasticsearch
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms256m -Xmx256m"
+    volumes:
+      - elk_data:/usr/share/elasticsearch/data
+    networks:
+      - mgmt_network
+    ports:
+      - "127.0.0.1:9200:9200"
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.13.4
+    container_name: cyberlab-kibana
+    depends_on:
+      - elasticsearch
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+    networks:
+      - mgmt_network
+    ports:
+      - "127.0.0.1:5601:5601"
+
+  # â”€â”€ Vulnerable-by-design lab targets (isolated network only) â”€â”€â”€â”€â”€â”€â”€â”€
+  vuln-web:
+    build: ./containers/vuln-web
+    container_name: lab-vuln-web
+    networks:
+      - lab_network
+    labels:
+      cyberlab.role: "target"
+      cyberlab.difficulty: "easy"
+
+  linux-server-1:
+    build: ./containers/linux-server-1
+    container_name: lab-linux-server-1
+    networks:
+      - lab_network
+    labels:
+      cyberlab.role: "target"
+      cyberlab.os: "ubuntu"
+
+  linux-server-2:
+    build: ./containers/linux-server-2
+    container_name: lab-linux-server-2
+    networks:
+      - lab_network
+    labels:
+      cyberlab.role: "target"
+      cyberlab.os: "debian"
+
+  windows-workstation:
+    build: ./containers/windows-workstation
+    container_name: lab-windows-workstation
+    networks:
+      - lab_network
+    labels:
+      cyberlab.role: "target"
+      cyberlab.os: "simulated-windows"
+
+  mail-server:
+    build: ./containers/mail-server
+    container_name: lab-mail-server
+    networks:
+      - lab_network
+    labels:
+      cyberlab.role: "target"
+
+  ctf-bank:
+    build: ./containers/ctf-bank
+    container_name: lab-ctf-bank
+    networks:
+      - lab_network
+      - mgmt_network   # API needs to validate flags against it
+    labels:
+      cyberlab.role: "infra"
