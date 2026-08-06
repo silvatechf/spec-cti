@@ -98,7 +98,7 @@ Ensure you have Python 3.12+ and Docker Compose installed.
 ```bash
 # 1. Clone the repository
 git clone <your-fork-url> veredict-cti
-cd veredict-cti
+cd spec-cti
 
 # 2. Set up the virtual environment & install dependencies
 python -m venv .venv
